@@ -725,7 +725,7 @@ ggml_tensor * mtmd_graph::build_patch_merge_permute(ggml_tensor * cur, int scale
     // pad width and height to factor
     const int64_t pad_width  = MTMD_ALIGN(width,  scale_factor) - width;
     const int64_t pad_height = MTMD_ALIGN(height, scale_factor) - height;
-    cur = ggml_reshape_3d(ctx0, cur, n_embd, width, height);
+    cur = ggml_reshape_4d(ctx0, cur, n_embd, width, height, n_batch);
     if (pad_width || pad_height) {
         cur     = ggml_pad(ctx0, cur, 0, pad_width, pad_height, 0);
         width  += pad_width;
@@ -733,14 +733,14 @@ ggml_tensor * mtmd_graph::build_patch_merge_permute(ggml_tensor * cur, int scale
     }
 
     // unshuffle h
-    cur = ggml_reshape_3d(ctx0, cur, n_embd * scale_factor, width / scale_factor, height);
+    cur = ggml_reshape_4d(ctx0, cur, n_embd * scale_factor, width / scale_factor, height, n_batch);
     cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
 
     // unshuffle w
-    cur = ggml_cont_3d(ctx0, cur, n_embd * scale_factor * scale_factor, height / scale_factor, width / scale_factor);
+    cur = ggml_cont_4d(ctx0, cur, n_embd * scale_factor * scale_factor, height / scale_factor, width / scale_factor, n_batch);
     cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
 
-    cur = ggml_cont_2d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2]);
+    cur = ggml_cont_3d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2], n_batch);
     cb(cur, "pixel_shuffle", -1);
 
     return cur;

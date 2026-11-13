@@ -324,7 +324,20 @@ struct mtmd_image_tokens {
 
     bool can_batch_with(const mtmd_image_tokens & other) {
         // a canvas chunk holds a whole image group, its layout is not given by nx/ny alone
-        return nx == other.nx && ny == other.ny && pos == other.pos && pos != MTMD_POS_TYPE_CANVAS;
+        if (!(nx == other.nx && ny == other.ny && pos == other.pos && pos != MTMD_POS_TYPE_CANVAS)) {
+            return false;
+        }
+        // the encoder reads all entries with the pixel size of the first one, same nx/ny does not imply it (LFM2)
+        if (batch_f32.entries.empty() || other.batch_f32.entries.empty()) {
+            return false;
+        }
+        const auto & ref = batch_f32.entries[0];
+        for (const auto & e : other.batch_f32.entries) {
+            if (e.nx() != ref.nx() || e.ny() != ref.ny()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     mtmd_image_tokens clone() {
@@ -544,6 +557,7 @@ struct mtmd_input_chunks {
 struct mtmd_batch {
     mtmd_context * ctx;
     std::vector<const mtmd_input_chunk *> entries;
+    std::vector<size_t> entries_n_tokens; // set by mtmd_batch_encode(), a chunk can be freed before the others are read
     std::vector<float> output_embd; // aggregated output embedding for the whole batch
     mtmd_batch(mtmd_context * ctx): ctx(ctx) {}
     int32_t n_tokens() const {
@@ -3275,6 +3289,11 @@ static int32_t mtmd_batch_encode_impl(mtmd_batch * batch) {
         return 1;
     }
 
+    batch->entries_n_tokens.clear();
+    for (const auto * chunk : batch->entries) {
+        batch->entries_n_tokens.push_back(mtmd_input_chunk_get_n_tokens(chunk));
+    }
+
     LOG_DBG("%s: encoding batch with %zu entries and total %zu tokens\n",
             __func__, batch->entries.size(), mtmd_input_chunk_get_n_tokens(batch_chunk.get()));
     int32_t res = mtmd_encode_chunk_impl(
@@ -3301,9 +3320,10 @@ float * mtmd_batch_get_output_embd(mtmd_batch * batch, const mtmd_input_chunk * 
     }
     size_t offset = 0;
     const size_t n_embd = batch->ctx->n_embd_out();
-    for (const auto * c : batch->entries) {
+    for (size_t i = 0; i < batch->entries.size(); i++) {
+        const auto * c = batch->entries[i];
         size_t offset_prev = offset;
-        size_t n_tokens = mtmd_input_chunk_get_n_tokens(c);
+        size_t n_tokens = batch->entries_n_tokens[i];
         offset += n_tokens * n_embd;
         GGML_ASSERT(offset_prev <  batch->output_embd.size());
         GGML_ASSERT(offset      <= batch->output_embd.size());

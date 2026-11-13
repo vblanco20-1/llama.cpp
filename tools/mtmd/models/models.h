@@ -16,6 +16,7 @@
 struct mtmd_graph_siglip : mtmd_graph {
     mtmd_graph_siglip(mtmd_subcontext * ctx, const mtmd_image_f32 & img) : mtmd_graph(ctx, img) {}
     ggml_cgraph * build() override;
+    bool support_batch() const override { return proj_type == PROJECTOR_TYPE_LFM2; }
 };
 
 struct mtmd_graph_gemma4v : mtmd_graph {

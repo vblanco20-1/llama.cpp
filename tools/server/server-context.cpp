@@ -869,7 +869,8 @@ struct server_slot {
 
 // encode the mtmd chunk at idx, batched with as many of the next chunks as possible
 // returns 0 on success
-static int encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx) {
+// slots: if given, the next media chunk of the other decision slots joins the batch, see add_prompt_mixed()
+static int encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, const std::vector<server_slot> * slots = nullptr) {
     const auto & mctx = slot.mctx;
     const auto & input_tokens = slot.task->tokens;
     const auto & chunk = input_tokens.find_chunk(idx);
@@ -891,6 +892,28 @@ static int encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch,
         idx_cur = next_idx;
         SLT_DBG(slot, "try adding media chunk idx = %zu to batch, res = %d\n", next_idx, res);
         // if res != 0, batch is full or chunk is not compatible -> this loop breaks
+    }
+
+    for (size_t i = 0; slots && i < slots->size(); i++) {
+        const auto & other = (*slots)[i];
+        const bool is_waiting = other.state == SLOT_STATE_STARTED || other.state == SLOT_STATE_PROCESSING_PROMPT;
+        if (&other == &slot || !is_waiting || other.task->type != SERVER_TASK_TYPE_DECISION || !other.task->tokens.has_mtmd) {
+            continue;
+        }
+        const auto & tokens = other.task->tokens;
+        // a slot that has not started yet keeps the common prefix with its previous prompt
+        const size_t n_done = other.state == SLOT_STATE_STARTED ? other.prompt.tokens.get_common_prefix(tokens) : other.prompt.n_tokens();
+        const mtmd::input_chunk_ptr * next = nullptr;
+        if (n_done == 0 && tokens[0] == LLAMA_TOKEN_NULL) {
+            next = &tokens.find_chunk(0);
+        } else if (n_done > 0) {
+            next = tokens.find_next_media_chunk(n_done - 1).first;
+        } else {
+            next = tokens.find_next_media_chunk(0).first;
+        }
+        if (next && mtmd_batch_add_chunk(mbatch.get(), next->get()) == 0) {
+            n_added++;
+        }
     }
 
     // TODO @ngxson : move this log line to debug when it become more stable
@@ -4427,9 +4450,20 @@ private:
                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
                             n_swa > 0);
 
+                    // a decision prompt with images goes in the batch as a whole, the images of all slots are then processed together
+                    // the parent of a shared prompt stops at the end of the shared part, its children start from there
+                    const int32_t n_end  = wait_shared ? slot.task->n_tokens_shared : slot.task->n_tokens();
+                    const int32_t n_rest = n_end - slot.prompt.n_tokens();
+                    const bool is_decision_mixed = slot.task->type == SERVER_TASK_TYPE_DECISION && slot.can_split()
+                        && !slot.task->is_child()
+                        && n_rest <= n_batch && !mtmd_decode_use_non_causal(mctx, nullptr);
+                    if (is_decision_mixed && input_tokens.has_mtmd && batch.size() + n_rest > n_batch) {
+                        return; // no room left - will try next iter
+                    }
+
                     // TODO: do the same for all models, then remove process_mtmd_chunk()
-                    if (use_mixed_batch() && !slot.can_split() && input_tokens.has_mtmd) {
-                        if (!add_prompt_mixed(slot)) {
+                    if (((use_mixed_batch() && !slot.can_split()) || is_decision_mixed) && input_tokens.has_mtmd) {
+                        if (!add_prompt_mixed(slot, is_decision_mixed ? n_end : slot.task->n_tokens())) {
                             return;
                         }
                     }
@@ -4628,11 +4662,11 @@ private:
     // add the rest of the prompt to the batch, the mtmd chunks are added as embeddings next to the text tokens
     // the caller makes sure that it fits in the batch
     // returns false on error, the slot is then released
-    bool add_prompt_mixed(server_slot & slot) {
+    bool add_prompt_mixed(server_slot & slot, int32_t n_end) {
         const auto & input_tokens = slot.task->tokens;
         const auto n_tokens_prev = batch.size();
 
-        while (slot.prompt.n_tokens() < slot.task->n_tokens()) {
+        while (slot.prompt.n_tokens() < n_end) {
             const auto cur_token_idx = slot.prompt.n_tokens();
             const llama_token cur_tok = input_tokens[cur_token_idx];
 
@@ -4653,11 +4687,17 @@ private:
             const auto & chunk = input_tokens.find_chunk(cur_token_idx);
 
             float * embd = slot.mbatch ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk.get()) : nullptr;
+            // the chunk can be in the batch of another slot
+            for (size_t i = 0; !embd && i < slots.size(); i++) {
+                if (slots[i].mbatch) {
+                    embd = mtmd_batch_get_output_embd(slots[i].mbatch.get(), chunk.get());
+                }
+            }
             if (!embd) {
                 // encode on the worker thread, so we can still handle metrics tasks
                 int32_t res = 0;
                 queue_tasks.yield_to_queue([&]() {
-                    res = encode_mtmd_chunk(slot, slot.mbatch, cur_token_idx);
+                    res = encode_mtmd_chunk(slot, slot.mbatch, cur_token_idx, &slots);
                 });
                 embd = res == 0 ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk.get()) : nullptr;
             }
