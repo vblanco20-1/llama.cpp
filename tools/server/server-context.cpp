@@ -4454,10 +4454,12 @@ private:
                     // the parent of a shared prompt stops at the end of the shared part, its children start from there
                     const int32_t n_end  = wait_shared ? slot.task->n_tokens_shared : slot.task->n_tokens();
                     const int32_t n_rest = n_end - slot.prompt.n_tokens();
-                    const bool is_decision_mixed = slot.task->type == SERVER_TASK_TYPE_DECISION && slot.can_split()
+                    // note: has_mtmd is checked first, mctx is null without a mmproj
+                    const bool is_decision_mixed = input_tokens.has_mtmd
+                        && slot.task->type == SERVER_TASK_TYPE_DECISION && slot.can_split()
                         && !slot.task->is_child()
                         && n_rest <= n_batch && !mtmd_decode_use_non_causal(mctx, nullptr);
-                    if (is_decision_mixed && input_tokens.has_mtmd && batch.size() + n_rest > n_batch) {
+                    if (is_decision_mixed && batch.size() + n_rest > n_batch) {
                         return; // no room left - will try next iter
                     }
 
