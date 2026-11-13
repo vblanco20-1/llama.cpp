@@ -4427,9 +4427,20 @@ private:
                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
                             n_swa > 0);
 
+                    // a decision prompt with images goes in the batch as a whole, the images of all slots are then processed together
+                    // the parent of a shared prompt stops at the end of the shared part, its children start from there
+                    const int32_t n_end  = wait_shared ? slot.task->n_tokens_shared : slot.task->n_tokens();
+                    const int32_t n_rest = n_end - slot.prompt.n_tokens();
+                    const bool is_decision_mixed = slot.task->type == SERVER_TASK_TYPE_DECISION && slot.can_split()
+                        && !slot.task->is_child()
+                        && n_rest <= n_batch && !mtmd_decode_use_non_causal(mctx, nullptr);
+                    if (is_decision_mixed && input_tokens.has_mtmd && batch.size() + n_rest > n_batch) {
+                        return; // no room left - will try next iter
+                    }
+
                     // TODO: do the same for all models, then remove process_mtmd_chunk()
-                    if (use_mixed_batch() && !slot.can_split() && input_tokens.has_mtmd) {
-                        if (!add_prompt_mixed(slot)) {
+                    if (((use_mixed_batch() && !slot.can_split()) || is_decision_mixed) && input_tokens.has_mtmd) {
+                        if (!add_prompt_mixed(slot, is_decision_mixed ? n_end : slot.task->n_tokens())) {
                             return;
                         }
                     }
@@ -4628,11 +4639,11 @@ private:
     // add the rest of the prompt to the batch, the mtmd chunks are added as embeddings next to the text tokens
     // the caller makes sure that it fits in the batch
     // returns false on error, the slot is then released
-    bool add_prompt_mixed(server_slot & slot) {
+    bool add_prompt_mixed(server_slot & slot, int32_t n_end) {
         const auto & input_tokens = slot.task->tokens;
         const auto n_tokens_prev = batch.size();
 
-        while (slot.prompt.n_tokens() < slot.task->n_tokens()) {
+        while (slot.prompt.n_tokens() < n_end) {
             const auto cur_token_idx = slot.prompt.n_tokens();
             const llama_token cur_tok = input_tokens[cur_token_idx];
 
