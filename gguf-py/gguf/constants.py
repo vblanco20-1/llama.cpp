@@ -7012,6 +7012,7 @@ class DecisionType:
     GRANITE_SWITCH = "granite-switch"  # same as openjev, run by the decision aLoRA of granite switch
     H2O_LIGHTNING = "h2o-lightning"  # same as openjev, labels read after an answer prefill
     MINICPM_OCR_JEV = "openbmb-minicpm-ocr-jev"  # class scores of a value head read at the last token, one fixed task
+    PPLX_DECIDER_V4 = "pplx-decider-v4"  # same as vllm-d3, readout at a marker after the question (chunked protocol v4)
 
 
 class VisionProjectorType:

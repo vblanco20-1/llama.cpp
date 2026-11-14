@@ -76,6 +76,7 @@ struct server_decision_context {
             case COMMON_DECISION_TYPE_MINICPM_OCR_JEV:
             case COMMON_DECISION_TYPE_LFM3_D1:
             case COMMON_DECISION_TYPE_LFM3_D1_OMNI:
+            case COMMON_DECISION_TYPE_PPLX_DECIDER_V4:
                 return true;
             default:
                 return false;

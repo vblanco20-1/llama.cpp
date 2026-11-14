@@ -106,7 +106,7 @@ void server_decision_context::init(const llama_model * model) {
         }
         n_options_max   = labels.size();
         noul_true_first = true;
-    } else if (model_type == COMMON_DECISION_TYPE_LEV || model_type == COMMON_DECISION_TYPE_GRANITE_SWITCH || model_type == COMMON_DECISION_TYPE_NIMBLE || model_type == COMMON_DECISION_TYPE_PPLX_DECIDER || model_type == COMMON_DECISION_TYPE_VLLM_D3) {
+    } else if (model_type == COMMON_DECISION_TYPE_LEV || model_type == COMMON_DECISION_TYPE_GRANITE_SWITCH || model_type == COMMON_DECISION_TYPE_NIMBLE || model_type == COMMON_DECISION_TYPE_PPLX_DECIDER || model_type == COMMON_DECISION_TYPE_VLLM_D3 || model_type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4) {
         // label codes are A..Z then AA..ZZ, only the ones that are a single token are used
         std::vector<std::string> codes;
         for (char a = 'A'; a <= 'Z'; a++) {
@@ -243,8 +243,9 @@ static bool decision_is_payload(const json & val) {
 }
 
 std::vector<server_decision_question> server_decision_context::parse_questions(const json & body) const {
-    // lfm2-d1, lfm2-d1-omni, lfm3-d1 and vllm-d3 accept a null state, for example to ask about images only
-    const bool null_state = type == COMMON_DECISION_TYPE_LFM2_D1 || type == COMMON_DECISION_TYPE_LFM2_D1_OMNI || type == COMMON_DECISION_TYPE_VLLM_D3 || type == COMMON_DECISION_TYPE_LFM3_D1 || type == COMMON_DECISION_TYPE_LFM3_D1_OMNI;
+    // lfm2-d1, lfm2-d1-omni, lfm3-d1, vllm-d3 and pplx-decider-v4 accept a null state, for example to ask about images only
+    const bool null_state = type == COMMON_DECISION_TYPE_LFM2_D1 || type == COMMON_DECISION_TYPE_LFM2_D1_OMNI || type == COMMON_DECISION_TYPE_VLLM_D3 || type == COMMON_DECISION_TYPE_LFM3_D1 || type == COMMON_DECISION_TYPE_LFM3_D1_OMNI ||
+                            type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4;
     if (!body.contains("state") || (body.at("state").is_null() && !null_state)) {
         throw std::invalid_argument("\"state\" must be provided");
     }
@@ -266,13 +267,14 @@ std::vector<server_decision_question> server_decision_context::parse_questions(c
         if (!q.is_object()) {
             throw err("must be an object");
         }
-        // the vllm-d3 prompt has a default question
+        // the vllm-d3 and pplx-decider-v4 prompts have a default question
         // h2o-lightning: the instructions can be left out, the template has a default, and the type defaults to choice
         const bool is_h2o = type == COMMON_DECISION_TYPE_H2O_LIGHTNING;
         const json instructions = q.contains("instructions") ? q.at("instructions") : (is_h2o ? json(std::string()) : json());
         // minicpm-ocr-jev answers one fixed question, the prompt is entirely in the template
         const bool is_ocr_jev = type == COMMON_DECISION_TYPE_MINICPM_OCR_JEV;
-        if (instructions.is_null() && type != COMMON_DECISION_TYPE_VLLM_D3 && !is_h2o && !is_ocr_jev) {
+        const bool has_default_instructions = type == COMMON_DECISION_TYPE_VLLM_D3 || type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4;
+        if (instructions.is_null() && !has_default_instructions && !is_h2o && !is_ocr_jev) {
             throw err("\"instructions\" must be provided");
         }
         if (strict_payload && (!decision_is_payload(instructions) || instructions == "")) {
@@ -314,7 +316,12 @@ std::vector<server_decision_question> server_decision_context::parse_questions(c
             if (is_h2o && (!criteria.is_array() || criteria.empty())) {
                 throw err("\"criteria\" must be a non-empty array");
             }
-            if (!is_h2o && (!criteria.is_array() || criteria.size() < 2 || criteria.size() > 10)) {
+            // pplx-decider-v4: from 2 levels, the maximum is n_options_max
+            const bool is_pplx_v4 = type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4;
+            if (is_pplx_v4 && (!criteria.is_array() || criteria.size() < 2)) {
+                throw err("\"criteria\" must be an array of at least 2 levels");
+            }
+            if (!is_h2o && !is_pplx_v4 && (!criteria.is_array() || criteria.size() < 2 || criteria.size() > 10)) {
                 throw err("\"criteria\" must be an array of 2 to 10 levels");
             }
             for (size_t i = 0; i < criteria.size(); i++) {
@@ -1139,6 +1146,23 @@ std::string server_decision_context::render(
         inp["instructions"] = decision_kev_text(question.instructions);
     }
 
+    // pplx-decider-v4: the values that are not text are written as json.dumps() of Python, the template escapes the special tokens
+    if (type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4) {
+        const auto py_text = [](const json & val) {
+            return val.is_string() ? val : json(decision_py_dumps(val, -1, ", ", ": ", false));
+        };
+        inp["state"] = py_text(state);
+        if (!question.instructions.is_null()) {
+            inp["instructions"] = py_text(question.instructions);
+        }
+        for (auto & option : inp["options"]) {
+            // a score level is always written, null as "null"
+            if (!option["description"].is_null() || question.type == SERVER_DECISION_QUESTION_SCORE) {
+                option["description"] = py_text(option["description"]);
+            }
+        }
+    }
+
     // the OCR text must not be parsed as special tokens
     if (type == COMMON_DECISION_TYPE_MINICPM_OCR_JEV) {
         inp["state"] = server_decision_escape_special_tokens(state.get<std::string>());
@@ -1221,7 +1245,7 @@ void server_decision_context::fill_task(
     }
 
     if (type == COMMON_DECISION_TYPE_OPENJEV || type == COMMON_DECISION_TYPE_GRANITE_SWITCH || type == COMMON_DECISION_TYPE_LEV || type == COMMON_DECISION_TYPE_NIMBLE || type == COMMON_DECISION_TYPE_PPLX_DECIDER || type == COMMON_DECISION_TYPE_VLLM_D3 ||
-        type == COMMON_DECISION_TYPE_H2O_LIGHTNING) {
+        type == COMMON_DECISION_TYPE_H2O_LIGHTNING || type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4) {
         // lev reads the ratings of a noul question at its first labels, not at the digits
         task.decision.labels.assign(labels.begin(), labels.begin() + n_outputs(question));
     }
@@ -1237,7 +1261,7 @@ void server_decision_context::fill_task(
         task.decision.no_batching = is_lfm3_d1();
     }
     if (type == COMMON_DECISION_TYPE_OPENJEV || type == COMMON_DECISION_TYPE_LEV || type == COMMON_DECISION_TYPE_NIMBLE || type == COMMON_DECISION_TYPE_PPLX_DECIDER || type == COMMON_DECISION_TYPE_VLLM_D3 || type == COMMON_DECISION_TYPE_LFM2_D1 ||
-        type == COMMON_DECISION_TYPE_H2O_LIGHTNING || type == COMMON_DECISION_TYPE_LFM3_D1 || type == COMMON_DECISION_TYPE_LFM3_D1_OMNI) {
+        type == COMMON_DECISION_TYPE_H2O_LIGHTNING || type == COMMON_DECISION_TYPE_LFM3_D1 || type == COMMON_DECISION_TYPE_LFM3_D1_OMNI || type == COMMON_DECISION_TYPE_PPLX_DECIDER_V4) {
         if (!media.empty()) {
             // the d1 reference sees the frames of a video, not its soundtrack
             mtmd_helper_init_opt opt = init_opt;
