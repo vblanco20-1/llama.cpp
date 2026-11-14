@@ -1970,6 +1970,32 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             if (!layer.nextn.shared_head_head_in_s && layer.nextn.shared_head_head) {
                 layer.nextn.shared_head_head_in_s = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "input_scale", i), {1}, TENSOR_NOT_REQUIRED);
             }
+
+            // MACaQ: the pre_scale of each dense linear on a build_lora_mm path, see load_tensors_hadamard
+            if (hdmd.macaq_block > 0) {
+                const auto add_pre_scale = [&](ggml_tensor * w, llm_tensor tid) {
+                    if (w == nullptr || w->ne[2] != 1) {
+                        return;
+                    }
+                    ggml_tensor * ps = create_tensor(tn(tid, "pre_scale", i), {w->ne[0]}, TENSOR_NOT_REQUIRED);
+                    if (ps) {
+                        hdmd.pre_scale[ggml_get_name(w)] = ps;
+                        hdmd.weight_blocks.emplace(ggml_get_name(w), hdmd.macaq_block);
+                    }
+                };
+                add_pre_scale(layer.wq,        LLM_TENSOR_ATTN_Q);
+                add_pre_scale(layer.wk,        LLM_TENSOR_ATTN_K);
+                add_pre_scale(layer.wv,        LLM_TENSOR_ATTN_V);
+                add_pre_scale(layer.wo,        LLM_TENSOR_ATTN_OUT);
+                add_pre_scale(layer.wqkv,      LLM_TENSOR_ATTN_QKV);
+                add_pre_scale(layer.wqkv_gate, LLM_TENSOR_ATTN_GATE);
+                add_pre_scale(layer.ssm_out,   LLM_TENSOR_SSM_OUT);
+                add_pre_scale(layer.ssm_beta,  LLM_TENSOR_SSM_BETA);
+                add_pre_scale(layer.ssm_alpha, LLM_TENSOR_SSM_ALPHA);
+                add_pre_scale(layer.ffn_gate,  LLM_TENSOR_FFN_GATE);
+                add_pre_scale(layer.ffn_up,    LLM_TENSOR_FFN_UP);
+                add_pre_scale(layer.ffn_down,  LLM_TENSOR_FFN_DOWN);
+            }
         }
         // output scales
         if (output) {
@@ -2174,6 +2200,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 // read and check the prism.hadamard metadata, and record the folded weights (load_tensors_hadamard makes the tensors)
 void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
     uint32_t hadamard_version = 0;
+    // MACaQ: W_f = (W / p) * H with p a per-input-channel scale; the graph applies p, then H, to the matmul input
+    if (ml.get_key(LLM_KV_MACAQ_HADAMARD_BLOCK, hdmd.macaq_block, false)) {
+        if (hdmd.macaq_block == 0 || (hdmd.macaq_block & (hdmd.macaq_block - 1)) != 0) {
+            throw std::runtime_error(format("invalid macaq.hadamard_block: %u", hdmd.macaq_block));
+        }
+        if (ml.get_key(LLM_KV_PRISM_HADAMARD_VERSION, hadamard_version, false)) {
+            throw std::runtime_error("a model cannot have both macaq.hadamard_block and prism.hadamard");
+        }
+        if (arch != LLM_ARCH_QWEN3 && arch != LLM_ARCH_QWEN35) {
+            throw std::runtime_error(format("macaq: arch '%s' is not verified to apply the activation transform", llm_arch_name(arch)));
+        }
+    }
     ml.get_key(LLM_KV_PRISM_HADAMARD_TIED_OUTPUT, hdmd.tied_output, false);
     if (ml.get_key(LLM_KV_PRISM_HADAMARD_VERSION, hadamard_version, false)) {
         if (hadamard_version != 1 && hadamard_version != 2) {
@@ -2443,7 +2481,9 @@ void llama_model_base::load_tensors_hadamard() {
             }
 
             ggml_tensor * sign_tensor = nullptr;
-            if (!hdmd.sign_data.empty()) {
+            if (const auto ps = hdmd.pre_scale.find(weight_name); ps != hdmd.pre_scale.end()) {
+                sign_tensor = ps->second;
+            } else if (!hdmd.sign_data.empty()) {
                 const uint32_t width = (uint32_t) weight->ne[0];
                 const auto sd = hdmd.sign_data.find(width);
                 if (sd == hdmd.sign_data.end()) {

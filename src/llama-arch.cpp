@@ -499,6 +499,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_XIELU_EPS,             "xielu.eps"             },
 
     { LLM_KV_PRISM_HADAMARD_VERSION,              "prism.hadamard.version"              },
+    { LLM_KV_MACAQ_HADAMARD_BLOCK,                "macaq.hadamard_block"                },
     { LLM_KV_PRISM_HADAMARD_TIED_OUTPUT,          "prism.hadamard.tied_output"          },
     { LLM_KV_PRISM_HADAMARD_BLOCK_SIZE,           "prism.hadamard.block_size"           },
     { LLM_KV_PRISM_HADAMARD_TRANSFORM,            "prism.hadamard.transform"            },

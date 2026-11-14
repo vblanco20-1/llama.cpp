@@ -744,6 +744,10 @@ struct llama_hadamard {
     bool gdn_v_grouped = false;
     bool tied_output = false;
 
+    // MACaQ: block size, and the pre_scale of each folded weight (its diagonal in place of the signs)
+    uint32_t macaq_block = 0;
+    std::unordered_map<std::string, ggml_tensor *> pre_scale;
+
     llama_hadamard_rotations rot; // folded weight -> activation transform
     llama_hadamard_rotations inv; // latent lookup table -> inverse transform
 };
